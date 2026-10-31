@@ -26,7 +26,7 @@ function envelope(data: unknown, status = 200) {
 type Call = { url: URL; method: string; headers: Record<string, string>; body?: string };
 
 /** Stands in for HubID, the payments interchange and Zeke. */
-function fakeBackends(state: { jwtExp: number }) {
+function fakeBackends(state: { agentExchanges: number }) {
   const calls: Call[] = [];
   const fetchImpl = (async (input: string | URL, init: RequestInit = {}) => {
     const url = new URL(String(input));
@@ -40,8 +40,25 @@ function fakeBackends(state: { jwtExp: number }) {
         return envelope({ token: fakeJwt({ sub: 42, iat: Math.floor(Date.now() / 1000) - 100, exp: Math.floor(Date.now() / 1000) + 86400 }) });
       }
       if (url.pathname.startsWith("/zeke/")) return envelope([{ id: 1 }, { id: 2 }, { id: 3 }]);
+      if (url.pathname === "/mandala/key/token") {
+        expect(headers["private-key"]).toBeUndefined();
+        const { key } = JSON.parse(call.body!);
+        if (key !== "agent-key-1") return new Response(JSON.stringify({ status: "error", errors: ["Invalid or revoked key."], data: null }), { status: 401 });
+        state.agentExchanges++;
+        return envelope({ token: fakeJwt({ sub: 654408, iat: Math.floor(Date.now() / 1000), nbf: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 86400 }), user_id: 654408 });
+      }
+      if (url.pathname === "/mandala/send") {
+        expect(headers["idempotency-key"]).toBeTruthy();
+        const body = JSON.parse(call.body!);
+        if (body.amount >= 50) return new Response(JSON.stringify({ status: "pending_approval", approval_id: 31, amount: body.amount }), { status: 202 });
+        return envelope({ to: body.to, amount: body.amount, balance: 90 });
+      }
       expect(headers["private-key"]).toBe("priv");
       expect(headers.authorization).toMatch(/^Bearer /);
+      const sub = JSON.parse(Buffer.from(headers.authorization.split(".")[1], "base64url").toString()).sub;
+      if (url.pathname === "/user" && sub === 654408) {
+        return envelope({ id: 654408, name: "Vela Lumen" });
+      }
       if (url.pathname === "/user") {
         return envelope({ id: 42, name: "Jane Doe", first: "Jane", last: "Doe", email: "jane@example.com", ven_balance: { balance: 500 }, profile: { banking_iban: "SECRET" } });
       }
@@ -67,7 +84,7 @@ function fakeBackends(state: { jwtExp: number }) {
     if (url.host === "zeke.hubculture.test") {
       const body = JSON.parse(call.body!);
       expect(headers.authorization).toBe("Bearer zeketoken");
-      expect(body.data.hub_auth).toMatch(/\./);
+      expect(body.data.hub_auth).toBeUndefined(); // never forwarded: Zeke could otherwise send Ven outside the mandate
       const sse = [
         `data: {"event": "start", "thread_id": "t-1"}`,
         `data: {"event": "node_complete", "node": "vss_events_tool_node", "content": "tool output"}`,
@@ -77,7 +94,6 @@ function fakeBackends(state: { jwtExp: number }) {
     }
     throw new Error(`unexpected fetch ${url}`);
   }) as typeof fetch;
-  void state;
   return { fetchImpl, calls };
 }
 
@@ -93,7 +109,8 @@ function testConfig(overrides: Record<string, string> = {}) {
     PAYMENTS_SHARED_SECRET: "paysecret",
     ZEKE_URL: "https://zeke.hubculture.test",
     ZEKE_SYSTEM_TOKEN: "zeketoken",
-    MAX_VEN_PER_TRANSFER: "100",
+    VEN_SEND_PER_TX: "100",
+    VEN_SEND_PER_DAY: "120",
     ...overrides,
   });
 }
@@ -114,7 +131,7 @@ async function signIn(app: ReturnType<typeof createApp>, hubJwt: string, scope?:
   expect(auth.headers["x-frame-options"]).toBe("DENY");
   const pending = /name="pending" value="([^"]+)"/.exec(auth.text)![1];
 
-  const consent = await request(app).post("/consent").type("form").send({ pending, decision: "approve" });
+  const consent = await request(app).post("/consent").type("form").send({ pending, decision: "member" });
   expect(consent.status).toBe(302);
   const hubUrl = new URL(consent.headers.location);
   expect(hubUrl.origin + hubUrl.pathname).toBe("https://id.hubculture.test/oauth/authorization");
@@ -153,10 +170,12 @@ const callTool = (app: ReturnType<typeof createApp>, token: string, name: string
 describe("Hub Culture MCP server", () => {
   let app: ReturnType<typeof createApp>;
   let backends: ReturnType<typeof fakeBackends>;
+  let state: { agentExchanges: number };
   const now = () => Math.floor(Date.now() / 1000);
 
   beforeEach(() => {
-    backends = fakeBackends({ jwtExp: 0 });
+    state = { agentExchanges: 0 };
+    backends = fakeBackends(state);
     app = createApp(testConfig(), new MemoryStore(), backends.fetchImpl);
   });
 
@@ -181,51 +200,120 @@ describe("Hub Culture MCP server", () => {
 
   it("signs in through HubID and calls tools as the member", async () => {
     const { access_token, scope } = await signIn(app, fakeJwt({ sub: 42, iat: now(), exp: now() + 86400 }));
-    expect(scope.split(" ")).toEqual(expect.arrayContaining(["read", "write", "ven:transfer", "ven:purchase", "zeke"]));
+    expect(scope.split(" ")).toEqual(expect.arrayContaining(["profile:read", "hubs:write", "ven:send", "ven:purchase", "zeke:ask"]));
 
     const list = await mcp(app, access_token, "tools/list");
     const names = list.body.result.tools.map((t: { name: string }) => t.name);
-    expect(names).toEqual(expect.arrayContaining(["hub_get_me", "ven_send", "ven_purchase_quote", "zeke_ask"]));
+    expect(names).toEqual(expect.arrayContaining(["hubid_get_profile", "hubs_post_discussion", "ven_send", "ven_purchase_quote", "ask_zeke"]));
+    for (const tool of list.body.result.tools) {
+      expect(tool.annotations.title).toBeTruthy(); // directory review: every tool has a title and a hint
+      expect(tool.annotations.readOnlyHint === true || typeof tool.annotations.destructiveHint === "boolean").toBe(true);
+    }
     expect(list.body.result.tools.find((t: { name: string }) => t.name === "ven_send").annotations.destructiveHint).toBe(true);
 
-    const me = JSON.parse((await callTool(app, access_token, "hub_get_me")).content[0].text);
-    expect(me).toMatchObject({ id: 42, name: "Jane Doe", ven_balance: 500 });
+    const me = JSON.parse((await callTool(app, access_token, "hubid_get_profile")).content[0].text);
+    expect(me).toMatchObject({ id: 42, name: "Jane Doe", ven_balance: 500, principal: "member" });
     expect(JSON.stringify(me)).not.toContain("SECRET");
 
-    const friends = JSON.parse((await callTool(app, access_token, "hub_list_friends")).content[0].text);
+    const friends = JSON.parse((await callTool(app, access_token, "hubid_list_friends")).content[0].text);
     expect(friends.items[0]).toEqual({ id: 7, name: "Sam", picture: "t.jpg" }); // no email or banking fields for others
 
     const quote = JSON.parse((await callTool(app, access_token, "ven_purchase_quote", { ven_amount: 200, currency: "usd" })).content[0].text);
     expect(quote.fiat_amount).toBe("21.40");
 
-    const zeke = JSON.parse((await callTool(app, access_token, "zeke_ask", { message: "What is Ven?" })).content[0].text);
+    const zeke = JSON.parse((await callTool(app, access_token, "ask_zeke", { message: "What is Ven?" })).content[0].text);
     expect(zeke).toEqual({ answer: "Ven is Hub Culture's digital currency.", thread_id: "t-1" });
 
     const feed = JSON.parse((await callTool(app, access_token, "zeke_list_knowledge", { feed: "events", limit: 2 })).content[0].text);
     expect(feed).toEqual({ total: 3, items: [{ id: 1 }, { id: 2 }] });
   });
 
-  it("enforces the per-transfer Ven cap before calling HubID", async () => {
+  it("applies the member mandate: per-send cap, 24-hour cap, purpose and idempotency", async () => {
     const { access_token } = await signIn(app, fakeJwt({ sub: 42, iat: now(), exp: now() + 86400 }));
-    const tooMuch = await callTool(app, access_token, "ven_send", { to_user_id: 7, amount: 101 });
-    expect(tooMuch.isError).toBe(true);
+    const sends = () => backends.calls.filter((c) => c.url.pathname === "/transactions" && c.method === "POST").length;
+
+    const missing = await callTool(app, access_token, "ven_send", { to_user_id: 7, amount: 5 });
+    expect(missing.isError).toBe(true); // purpose and idempotency_key are required
+
+    const tooMuch = await callTool(app, access_token, "ven_send", { to_user_id: 7, amount: 101, purpose: "dinner", idempotency_key: "k-too-much" });
     expect(tooMuch.content[0].text).toContain("at most 100 Ven");
-    expect(backends.calls.some((c) => c.url.pathname === "/transactions")).toBe(false);
-
-    const badDecimals = await callTool(app, access_token, "ven_send", { to_user_id: 7, amount: 1.234 });
+    const badDecimals = await callTool(app, access_token, "ven_send", { to_user_id: 7, amount: 1.234, purpose: "dinner", idempotency_key: "k-decimals" });
     expect(badDecimals.isError).toBe(true);
+    expect(sends()).toBe(0);
 
-    const ok = JSON.parse((await callTool(app, access_token, "ven_send", { to_user_id: 7, amount: 25, message: "thanks" })).content[0].text);
-    expect(ok).toMatchObject({ sent: true, amount: 25, to: 7, balance_after: 475 });
+    const ok = JSON.parse((await callTool(app, access_token, "ven_send", { to_user_id: 7, amount: 100, purpose: "dinner", idempotency_key: "k-first-send" })).content[0].text);
+    expect(ok).toMatchObject({ status: "sent", amount: 100, to: 7, balance_after: 400 });
+    expect(JSON.parse(backends.calls.find((c) => c.url.pathname === "/transactions")!.body!).message).toBe("dinner");
+
+    const retry = JSON.parse((await callTool(app, access_token, "ven_send", { to_user_id: 7, amount: 100, purpose: "dinner", idempotency_key: "k-first-send" })).content[0].text);
+    expect(retry.replayed).toBe(true);
+    expect(sends()).toBe(1); // the retry did not send again
+
+    const overDay = await callTool(app, access_token, "ven_send", { to_user_id: 7, amount: 25, purpose: "lunch", idempotency_key: "k-second-send" });
+    expect(overDay.content[0].text).toContain("120 Ven per 24 hours");
+    expect(sends()).toBe(1);
+
+    const balance = JSON.parse((await callTool(app, access_token, "ven_get_balance")).content[0].text);
+    expect(balance.connector_mandate.remaining_24h).toBe(20);
+  });
+
+  it("connects an agent persona with its agent key, and routes its sends through the HubID mandate", async () => {
+    const reg = await request(app).post("/register").send({ redirect_uris: [REDIRECT], client_name: "Claude", token_endpoint_auth_method: "none" });
+    const verifier = randomBytes(32).toString("base64url");
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const auth = await request(app).get("/authorize").query({ response_type: "code", client_id: reg.body.client_id, redirect_uri: REDIRECT, code_challenge: challenge, code_challenge_method: "S256", state: "s" });
+    const pending = /name="pending" value="([^"]+)"/.exec(auth.text)![1];
+
+    const consent = await request(app).post("/consent").type("form").send({ pending, decision: "agent", agent_key: "agent-key-1" });
+    expect(consent.status).toBe(302);
+    const back = new URL(consent.headers.location);
+    expect(back.origin + back.pathname).toBe(REDIRECT); // straight back to Claude: no HubID password page
+    const token = await request(app).post("/token").type("form").send({ grant_type: "authorization_code", code: back.searchParams.get("code"), code_verifier: verifier, client_id: reg.body.client_id, redirect_uri: REDIRECT });
+    const access = token.body.access_token;
+
+    const me = JSON.parse((await callTool(app, access, "hubid_get_profile")).content[0].text);
+    expect(me).toMatchObject({ id: 654408, name: "Vela Lumen", principal: "agent" });
+
+    const small = JSON.parse((await callTool(app, access, "ven_send", { to_user_id: 7, amount: 10, purpose: "tip", idempotency_key: "agent-send-1" })).content[0].text);
+    expect(small.status).toBe("sent");
+    const mandalaCall = backends.calls.find((c) => c.url.pathname === "/mandala/send")!;
+    expect(mandalaCall.headers["idempotency-key"]).toBe("agent-send-1");
+    expect(backends.calls.some((c) => c.url.pathname === "/transactions" && c.method === "POST")).toBe(false);
+
+    const big = JSON.parse((await callTool(app, access, "ven_send", { to_user_id: 7, amount: 60, purpose: "supplies", idempotency_key: "agent-send-2" })).content[0].text);
+    expect(big).toMatchObject({ status: "pending_approval", approval_id: 31 });
+  });
+
+  it("refuses an agent key HubID doesn't accept", async () => {
+    const reg = await request(app).post("/register").send({ redirect_uris: [REDIRECT], token_endpoint_auth_method: "none" });
+    const auth = await request(app).get("/authorize").query({ response_type: "code", client_id: reg.body.client_id, redirect_uri: REDIRECT, code_challenge: "x".repeat(43), code_challenge_method: "S256" });
+    const pending = /name="pending" value="([^"]+)"/.exec(auth.text)![1];
+    const consent = await request(app).post("/consent").type("form").send({ pending, decision: "agent", agent_key: "wrong" });
+    expect(consent.status).toBe(400);
+    expect(consent.text).toContain("agent key");
+  });
+
+  it("hides tools an admin disabled, and rate-limits writes per sign-in", async () => {
+    app = createApp(testConfig({ DISABLED_TOOLS: "ven_send", RATE_LIMIT_WRITE_PER_MINUTE: "2" }), new MemoryStore(), backends.fetchImpl);
+    const { access_token } = await signIn(app, fakeJwt({ sub: 42, iat: now(), exp: now() + 86400 }));
+    const names = (await mcp(app, access_token, "tools/list")).body.result.tools.map((t: { name: string }) => t.name);
+    expect(names).not.toContain("ven_send");
+
+    for (let i = 0; i < 2; i++) await callTool(app, access_token, "hubid_set_status", { message: `status ${i}` });
+    const third = await callTool(app, access_token, "hubid_set_status", { message: "status 3" });
+    expect(third.isError).toBe(true);
+    expect(third.content[0].text).toContain("Rate limit");
   });
 
   it("only exposes tools for the scopes the member granted", async () => {
-    const { access_token } = await signIn(app, fakeJwt({ sub: 42, iat: now(), exp: now() + 86400 }), "read");
+    const { access_token } = await signIn(app, fakeJwt({ sub: 42, iat: now(), exp: now() + 86400 }), "profile:read hubs:read");
     const names = (await mcp(app, access_token, "tools/list")).body.result.tools.map((t: { name: string }) => t.name);
-    expect(names).toContain("hub_get_me");
+    expect(names).toContain("hubid_get_profile");
+    expect(names).toContain("hubs_list");
+    expect(names).not.toContain("ven_get_balance");
     expect(names).not.toContain("ven_send");
-    expect(names).not.toContain("hub_send_message");
-    expect(names).not.toContain("zeke_ask");
+    expect(names).not.toContain("messages_send");
+    expect(names).not.toContain("ask_zeke");
   });
 
   it("refreshes the HubID JWT when it is about to expire, and rotates refresh tokens", async () => {
@@ -248,7 +336,7 @@ describe("Hub Culture MCP server", () => {
     const challenge = createHash("sha256").update(verifier).digest("base64url");
     const auth = await request(app).get("/authorize").query({ response_type: "code", client_id: reg.body.client_id, redirect_uri: REDIRECT, code_challenge: challenge, code_challenge_method: "S256" });
     const pending = /name="pending" value="([^"]+)"/.exec(auth.text)![1];
-    const consent = await request(app).post("/consent").type("form").send({ pending, decision: "approve" });
+    const consent = await request(app).post("/consent").type("form").send({ pending, decision: "member" });
     const state = new URL(consent.headers.location).searchParams.get("state");
     const oldJwt = fakeJwt({ sub: 42, iat: now() - 15 * 86400, exp: now() - 14 * 86400 });
     const cb = await request(app).get("/hubid/callback").query({ access_token: oldJwt, state });
@@ -263,7 +351,7 @@ describe("Hub Culture MCP server", () => {
     const pending = /name="pending" value="([^"]+)"/.exec(auth.text)![1];
     const deny = await request(app).post("/consent").type("form").send({ pending, decision: "deny" });
     expect(new URL(deny.headers.location).searchParams.get("error")).toBe("access_denied");
-    const again = await request(app).post("/consent").type("form").send({ pending, decision: "approve" });
+    const again = await request(app).post("/consent").type("form").send({ pending, decision: "member" });
     expect(again.status).toBe(400);
 
     const forged = await request(app).get("/hubid/callback").query({ access_token: "x.y.z", state: pending });

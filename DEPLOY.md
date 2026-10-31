@@ -57,9 +57,12 @@ The checklist for getting this server running and available in Claude. Work thro
 | `TOKEN_ENCRYPTION_KEY` | Output of `openssl rand -base64 32`. Generate it once and keep it: changing it signs everyone out. |
 | `REDIS_URL` | From step 2 |
 | `PAYMENTS_URL` / `PAYMENTS_SHARED_SECRET` | The interchange's address and its `HUB_SHARED_SECRET`. Leave both empty to launch without the Ven-purchase tools. |
-| `ZEKE_URL` / `ZEKE_SYSTEM_TOKEN` | zeke-ai-server's address and its system bearer token. Leave both empty to launch without `zeke_ask`. |
-| `MAX_VEN_PER_TRANSFER` | `1000`, unless the product owner decides otherwise |
-| `DEFAULT_SCOPES` | `read write ven:transfer ven:purchase zeke`. Remove `ven:transfer` to launch without Ven sending. |
+| `ZEKE_URL` / `ZEKE_SYSTEM_TOKEN` | zeke-ai-server's address and its system bearer token. Leave both empty to launch without `ask_zeke`. |
+| `VEN_SEND_PER_TX` / `VEN_SEND_PER_DAY` | `100` / `500` Ven, unless the product owner decides otherwise. Members are held to these; agents are also held to their own HubID mandate. |
+| `DEFAULT_SCOPES` | All scopes, as in `.env.example`. Remove `ven:send` to launch without Ven sending. |
+| `DISABLED_TOOLS` | Empty. Name a tool here to turn it off for everyone. |
+
+**In HubID**, set `MANDALA_ENFORCE_VEN_SEND=true`. Without it, HubID doesn't apply agents' custodian policies (caps, allowlist, owner approval); only the connector's caps would hold.
 
 ## 4. Build and deploy
 
@@ -84,17 +87,23 @@ curl -i -X POST https://mcp.hubculture.com/mcp | grep -i www-authenticate      #
 
 1. Connect with MCP Inspector (`npx @modelcontextprotocol/inspector`) or Claude Code:
    `claude mcp add --transport http hub-culture https://mcp.hubculture.com/mcp`
-2. Sign in. You should see the consent page, then HubID's login, then a return to the client.
+2. Sign in as a member. You should see the consent page, then HubID's login, then a return to the client.
 3. Run each check:
-   - `hub_get_me` returns your profile.
-   - `hub_list_friends` returns no emails or banking fields.
-   - `ven_get_balance` returns your balance.
-   - `ven_get_exchange_rates` returns rates.
-   - `ven_send` 1 Ven to a second test account: the balance drops by 1.
-   - `ven_send` 1001 Ven is refused by the cap, and the balance is unchanged.
+   - `hubid_get_profile` returns your profile, with `principal: member`.
+   - `hubid_list_friends` returns no emails or banking fields.
+   - `ven_get_balance` returns your balance and the connector's remaining 24-hour allowance.
+   - `ven_get_price` returns rates.
+   - `ven_send` 1 Ven to a second test account, with a purpose and an idempotency key: the balance drops by 1.
+   - The same call again with the same key returns `replayed` and the balance is unchanged.
+   - `ven_send` 101 Ven is refused by the cap, and the balance is unchanged.
    - `ven_purchase_quote` with 200 USD returns a price (only if payments is configured).
-   - `zeke_ask` with "What is Ven?" returns an answer (only if Zeke is configured).
-4. Reconnect after 24 hours, or set the stored JWT's expiry back, to confirm the HubID token refresh works.
+   - `ask_zeke` with "What is Ven?" returns an answer (only if Zeke is configured).
+4. Connect a test agent persona:
+   - Issue it a Mandala agent key in HubID, and give it a custodian policy with a low approval threshold.
+   - Connect again and choose **Connecting an agent persona instead?** on the consent page.
+   - Check `hubid_get_profile` shows `principal: agent`.
+   - A `ven_send` above the threshold returns `pending_approval`, and it shows in the owner's custodian approvals.
+5. Reconnect after 24 hours, or set the stored JWT's expiry back, to confirm the HubID token refresh works.
 
 **Done when:** every check above passes. Post the results in the thread.
 
@@ -111,7 +120,9 @@ curl -i -X POST https://mcp.hubculture.com/mcp | grep -i www-authenticate      #
 
 ## 7. After launch
 
-- **Watch the logs** for `tool error:` and `sign-in error:` lines.
+- **Watch the logs** for `tool error:` and `sign-in error:` lines. Each write also logs one `audit` JSON line; ship these to log storage until OAI.io can take them.
 - **Expect re-sign-ins:** HubID tokens only refresh for 14 days after a login, so members reconnect every two weeks. This is expected.
+- **To cut off one tool,** add it to `DISABLED_TOOLS` and restart.
+- **To cut off one agent,** revoke its agent key in HubID. It loses access within the hour, at its next token renewal.
 - **To cut off the connector,** delete its `api_keys` rows. Every call fails at once.
 - **When HubID routes change,** update the matching tool in `src/tools/`.

@@ -15,7 +15,8 @@ export class UpstreamError extends Error {
 export type HubRequest = {
   method?: "GET" | "POST" | "PUT" | "DELETE";
   jwt?: string;
-  key?: "private" | "public";
+  key?: "private" | "public" | "none";
+  headers?: Record<string, string>;
   query?: Record<string, string | number | boolean | undefined>;
   body?: unknown;
 };
@@ -41,9 +42,10 @@ export class HubIdClient {
     for (const [name, value] of Object.entries(req.query ?? {})) {
       if (value !== undefined && value !== "") url.searchParams.set(name, String(value));
     }
-    const headers: Record<string, string> = { Accept: "application/json" };
-    if ((req.key ?? "private") === "private") headers["Private-Key"] = this.keys.privateKey;
-    else headers["Public-Key"] = this.keys.publicKey;
+    const headers: Record<string, string> = { Accept: "application/json", ...req.headers };
+    const key = req.key ?? "private";
+    if (key === "private") headers["Private-Key"] = this.keys.privateKey;
+    else if (key === "public") headers["Public-Key"] = this.keys.publicKey;
     if (req.jwt) headers.Authorization = `Bearer ${req.jwt}`;
     if (req.body !== undefined) headers["Content-Type"] = "application/json";
 
@@ -77,6 +79,17 @@ export class HubIdClient {
 
   getMe(jwt: string): Promise<HubUser> {
     return this.request<HubUser>("/user", { jwt });
+  }
+
+  /** POST /mandala/key/token: an agent's long-lived key for a fresh JWT. The key is the credential; no password. */
+  async exchangeAgentKey(agentKey: string): Promise<{ token: string; user_id: number }> {
+    const data = await this.request<{ token: string; user_id: number }>("/mandala/key/token", {
+      method: "POST",
+      key: "none",
+      body: { key: agentKey },
+    });
+    if (!data?.token) throw new UpstreamError("HubID did not return an agent token", 502, "hubid");
+    return data;
   }
 
   /** PUT /token: a new 24h JWT, allowed until 14 days after the original login. */

@@ -1,8 +1,12 @@
 import { UpstreamError } from "./hubid.js";
 
 // Zeke (hub-culture/zeke-ai-server). POST /chat takes the system bearer token and streams SSE
-// lines `data: {...}`. The user's HubID JWT goes in data.hub_auth so Zeke can act as them.
-// Like src/channels/zeke_client.py there, the answer is the last non-tool `node_complete`.
+// lines `data: {...}`. Like src/channels/zeke_client.py there, the answer is the last non-tool
+// `node_complete`.
+//
+// The caller's HubID JWT is deliberately NOT forwarded (no data.hub_auth): with it, Zeke's own
+// send_ven tool can POST /transactions as the caller, outside this connector's Ven mandate.
+// Without it Zeke answers from its public knowledge, which keeps ask_zeke read-only.
 
 // VSSToolNode in zekeai/agents/nodes/vss_factories/enums/e_vss_tool.py
 const TOOL_NODES = new Set([
@@ -23,7 +27,7 @@ export class ZekeClient {
     private readonly fetchImpl: typeof fetch = fetch,
   ) {}
 
-  async ask(message: string, opts: { hubJwt: string; threadId?: string }): Promise<{ answer: string; threadId?: string }> {
+  async ask(message: string, opts: { threadId?: string } = {}): Promise<{ answer: string; threadId?: string }> {
     const res = await this.fetchImpl(`${this.baseUrl}/chat`, {
       method: "POST",
       headers: { Authorization: `Bearer ${this.systemToken}`, "Content-Type": "application/json" },
@@ -31,7 +35,11 @@ export class ZekeClient {
         user_type: "claude_connector",
         message,
         thread_id: opts.threadId,
-        data: { hub_auth: opts.hubJwt, channel: "claude_connector", signed_in: true },
+        data: {
+          channel: "claude_connector",
+          signed_in: false,
+          note: "This question comes from a Claude agent through the Hub Culture connector. Answer from Hub Culture's public knowledge; account actions such as sending Ven are not available here.",
+        },
       }),
       signal: AbortSignal.timeout(120_000),
     });

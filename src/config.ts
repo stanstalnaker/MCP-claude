@@ -14,17 +14,29 @@ export type Config = {
   zeke?: { url: string; systemToken: string };
   redisUrl?: string;
   tokenEncryptionKey: Buffer;
-  maxVenPerTransfer: number;
+  /** Member mandate, enforced by the connector. Agent mandates are set per agent in HubID (Mandala custodian policy). */
+  venSendPerTx: number;
+  venSendPerDay: number;
   allowedRedirectUris: string[];
   defaultScopes: Scope[];
+  disabledTools: string[];
+  rateLimitPerMinute: { read: number; write: number };
+  agentGrantDays: number;
 };
 
+// Scope names follow the PRD ("Hub Culture Connector for Claude"), plus messages:* and ven:purchase.
 export const SCOPES = {
-  read: "Read your Hub Culture profile, friends, hubs, events, messages and Ven history",
-  write: "Post, message, send friend requests and create events as you",
-  "ven:transfer": "Send Ven from your wallet",
-  "ven:purchase": "Create Ven purchase orders (you still pay on the checkout page)",
-  zeke: "Ask Zeke on your behalf",
+  "profile:read": "Read your HubID profile, other members' public profiles and your friends",
+  "hubid:write": "Update your status and send or answer friend requests",
+  "hubs:read": "Read hubs, their discussions, news, events and pavilions",
+  "hubs:write": "Post discussions and create events as you",
+  "messages:read": "Read your private messages and alerts",
+  "messages:send": "Send private messages as you",
+  "ven:read": "See Ven prices, your balance and transaction history",
+  "ven:request": "Ask other members for Ven",
+  "ven:send": "Send Ven, within your mandate's caps",
+  "ven:purchase": "Start Ven purchases (you still pay on the checkout page)",
+  "zeke:ask": "Ask Zeke on your behalf",
 } as const;
 export type Scope = keyof typeof SCOPES;
 export const ALL_SCOPES = Object.keys(SCOPES) as Scope[];
@@ -77,8 +89,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         : undefined,
     redisUrl: env.REDIS_URL || undefined,
     tokenEncryptionKey: key,
-    maxVenPerTransfer: Number(env.MAX_VEN_PER_TRANSFER ?? 1000),
+    venSendPerTx: Number(env.VEN_SEND_PER_TX ?? 100),
+    venSendPerDay: Number(env.VEN_SEND_PER_DAY ?? 500),
     allowedRedirectUris: list(env.ALLOWED_REDIRECT_URIS) ?? DEFAULT_REDIRECTS,
     defaultScopes,
+    disabledTools: list(env.DISABLED_TOOLS) ?? [],
+    rateLimitPerMinute: {
+      read: Number(env.RATE_LIMIT_READ_PER_MINUTE ?? 60),
+      write: Number(env.RATE_LIMIT_WRITE_PER_MINUTE ?? 10),
+    },
+    agentGrantDays: Number(env.AGENT_GRANT_DAYS ?? 90),
   };
 }

@@ -17,6 +17,11 @@ const STYLE = `
   button { flex:1; font:inherit; padding:10px 14px; border-radius:8px; border:1px solid var(--line); background:transparent; color:var(--ink); cursor:pointer; }
   button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
   small { display:block; margin-top:16px; color:var(--muted); }
+  details { margin-top:20px; border-top:1px solid var(--line); padding-top:14px; }
+  summary { cursor:pointer; color:var(--muted); }
+  details p { margin:10px 0; }
+  label { display:block; font-size:14px; margin-bottom:6px; }
+  input[type=password] { width:100%; font:inherit; padding:9px 10px; border-radius:8px; border:1px solid var(--line); background:transparent; color:var(--ink); margin-bottom:12px; }
 `;
 
 export function renderConsentPage(input: { pendingId: string; clientName: string; redirectHost: string; scopes: string[] }): string {
@@ -31,8 +36,15 @@ export function renderConsentPage(input: { pendingId: string; clientName: string
     <input type="hidden" name="pending" value="${escapeHtml(input.pendingId)}">
     <div class="actions">
       <button type="submit" name="decision" value="deny">Cancel</button>
-      <button type="submit" name="decision" value="approve" class="primary">Continue to HubID</button>
+      <button type="submit" name="decision" value="member" class="primary">Continue to HubID</button>
     </div>
+    <details>
+      <summary>Connecting an agent persona instead?</summary>
+      <p>Paste the agent's Mandala agent key. The agent then acts as itself, within the spending policy its owner set in HubID. Revoke the key in HubID to cut it off.</p>
+      <label for="agent_key">Agent key</label>
+      <input id="agent_key" name="agent_key" type="password" autocomplete="off" spellcheck="false">
+      <div class="actions"><button type="submit" name="decision" value="agent">Connect agent</button></div>
+    </details>
   </form>
   <small>You'll return to ${escapeHtml(input.redirectHost)}. You can disconnect at any time from your Claude connector settings.</small>
 </main></body></html>`;

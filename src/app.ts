@@ -18,11 +18,11 @@ import { registerZekeTools } from "./tools/zeke.js";
 
 export const SERVER_INFO = { name: "hub-culture", version: "0.1.0" };
 
-const INSTRUCTIONS = `Tools for Hub Culture, acting as the signed-in HubID member.
-- hub_* tools cover the member's profile, people, friends, hubs, events, pavilions and private messages.
-- ven_* tools cover the Ven wallet, Ven rates and buying Ven. ven_send moves real value: always confirm recipient and amount with the user before calling it.
-- zeke_ask asks Zeke, Hub Culture's own assistant, which knows Hub Culture's news, events and pavilions.
-Look people up with hub_search_users or hub_list_friends to get the user id other tools need.`;
+const INSTRUCTIONS = `Hub Culture tools, acting as the signed-in HubID member, or as an agent persona under its owner's HubID.
+- hubid_* covers profiles, search and friends; hubs_* covers hubs, discussions, events and pavilions; messages_* covers private messages and alerts.
+- ven_* covers Ven prices, the wallet and buying Ven. ven_send moves real value: confirm the recipient and amount with the user, give a purpose, and reuse the same idempotency_key on any retry. A pending_approval result means the agent's owner must approve it in Hub Culture.
+- ask_zeke asks Zeke, Hub Culture's own assistant, which knows Hub Culture's news, events and pavilions.
+Look people up with hubid_search or hubid_list_friends to get the user id other tools need.`;
 
 export function createApp(config: Config, store: Store, fetchImpl: typeof fetch = fetch) {
   const hubid = new HubIdClient(config.hubid.url, config.hubid, fetchImpl);
@@ -57,7 +57,8 @@ export function createApp(config: Config, store: Store, fetchImpl: typeof fetch 
     setPageHeaders(res);
     try {
       const pending = String(req.body?.pending ?? "");
-      const location = await provider.handleConsent(pending, req.body?.decision === "approve");
+      const decision = req.body?.decision === "member" || req.body?.decision === "agent" ? req.body.decision : "deny";
+      const location = await provider.handleConsent(pending, decision, hubid, String(req.body?.agent_key ?? ""));
       res.redirect(302, location);
     } catch (err) {
       res.status(400).type("html").send(renderErrorPage(oauthMessage(err)));
@@ -71,7 +72,7 @@ export function createApp(config: Config, store: Store, fetchImpl: typeof fetch 
       const q = req.query as Record<string, string | undefined>;
       const location = await provider.handleHubCallback(
         { state: q.state, access_token: q.access_token, error: q.error },
-        (jwt) => hubid.getMe(jwt),
+        hubid,
       );
       res.redirect(302, location);
     } catch (err) {
@@ -89,7 +90,7 @@ export function createApp(config: Config, store: Store, fetchImpl: typeof fetch 
   app.post("/mcp", bearer, express.json({ limit: "1mb" }), async (req: Request, res: Response) => {
     const session = sessionFromAuth(req.auth, { config, store, hubid });
     const server = new McpServer(SERVER_INFO, { instructions: INSTRUCTIONS });
-    const deps = { config, session, hubid, payments, zeke, fetchImpl };
+    const deps = { config, store, session, hubid, payments, zeke, fetchImpl };
     registerHubTools(server, deps);
     registerVenTools(server, deps);
     registerZekeTools(server, deps);
