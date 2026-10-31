@@ -49,7 +49,10 @@ A token only lists the tools its scopes allow. claude.ai asks for no specific sc
 
 ## Setup
 
-1. **Register a HubID app.** Create an `ApiApps` record for the connector, titled "Claude" (HubID shows the title on its sign-in page). Put its id and keys in `HUBID_CLIENT_ID`, `HUBID_PUBLIC_KEY` and `HUBID_PRIVATE_KEY`.
+The full go-live checklist, with owners and checks, is in [DEPLOY.md](DEPLOY.md).
+
+
+1. **Register a HubID app.** In https://hubculture.com/admin/apps/, create an app for the connector titled "Claude" (HubID shows the title on its sign-in page). Put its id and keys in `HUBID_CLIENT_ID`, `HUBID_PUBLIC_KEY` and `HUBID_PRIVATE_KEY`.
 2. **Deploy behind HTTPS.** Copy `.env.example` to `.env` and fill it in. Run Redis, then `docker build -t hub-mcp . && docker run --env-file .env -p 8080:8080 hub-mcp`.
 3. **Connect.** In Claude, add `https://<host>/mcp` as a custom connector. An org owner can also add it for the whole organization.
 
