@@ -26,7 +26,7 @@ function envelope(data: unknown, status = 200) {
 type Call = { url: URL; method: string; headers: Record<string, string>; body?: string };
 
 /** Stands in for HubID, the payments interchange and Zeke. */
-function fakeBackends(state: { agentExchanges: number }) {
+function fakeBackends(state: { agentExchanges: number; zekeReadOnly: boolean }) {
   const calls: Call[] = [];
   const fetchImpl = (async (input: string | URL, init: RequestInit = {}) => {
     const url = new URL(String(input));
@@ -82,9 +82,17 @@ function fakeBackends(state: { agentExchanges: number }) {
     }
 
     if (url.host === "zeke.hubculture.test") {
+      if (url.pathname === "/health") {
+        return new Response(JSON.stringify({ status: "PASS", checks: [], capabilities: state.zekeReadOnly ? ["read_only"] : [] }), { status: 200 });
+      }
       const body = JSON.parse(call.body!);
       expect(headers.authorization).toBe("Bearer zeketoken");
-      expect(body.data.hub_auth).toBeUndefined(); // never forwarded: Zeke could otherwise send Ven outside the mandate
+      if (state.zekeReadOnly) {
+        expect(body.data.hub_auth).toMatch(/\./); // the caller's context...
+        expect(body.data.read_only).toBe(true); // ...with Zeke's own Ven sending switched off
+      } else {
+        expect(body.data.hub_auth).toBeUndefined(); // an older Zeke could send Ven with the token
+      }
       const sse = [
         `data: {"event": "start", "thread_id": "t-1"}`,
         `data: {"event": "node_complete", "node": "vss_events_tool_node", "content": "tool output"}`,
@@ -170,11 +178,11 @@ const callTool = (app: ReturnType<typeof createApp>, token: string, name: string
 describe("Hub Culture MCP server", () => {
   let app: ReturnType<typeof createApp>;
   let backends: ReturnType<typeof fakeBackends>;
-  let state: { agentExchanges: number };
+  let state: { agentExchanges: number; zekeReadOnly: boolean };
   const now = () => Math.floor(Date.now() / 1000);
 
   beforeEach(() => {
-    state = { agentExchanges: 0 };
+    state = { agentExchanges: 0, zekeReadOnly: true };
     backends = fakeBackends(state);
     app = createApp(testConfig(), new MemoryStore(), backends.fetchImpl);
   });
@@ -222,10 +230,22 @@ describe("Hub Culture MCP server", () => {
     expect(quote.fiat_amount).toBe("21.40");
 
     const zeke = JSON.parse((await callTool(app, access_token, "ask_zeke", { message: "What is Ven?" })).content[0].text);
-    expect(zeke).toEqual({ answer: "Ven is Hub Culture's digital currency.", thread_id: "t-1" });
+    expect(zeke).toEqual({ answer: "Ven is Hub Culture's digital currency.", thread_id: "t-1", caller_context: true });
+    const followUp = await callTool(app, access_token, "ask_zeke", { message: "And how do I earn it?", thread_id: "t-1" });
+    expect(followUp.isError).toBeFalsy();
+    const foreign = await callTool(app, access_token, "ask_zeke", { message: "hi", thread_id: "someone-elses-thread" });
+    expect(foreign.isError).toBe(true);
 
     const feed = JSON.parse((await callTool(app, access_token, "zeke_list_knowledge", { feed: "events", limit: 2 })).content[0].text);
     expect(feed).toEqual({ total: 3, items: [{ id: 1 }, { id: 2 }] });
+  });
+
+  it("asks an older Zeke without the caller's token, so it can't send Ven", async () => {
+    state.zekeReadOnly = false;
+    const { access_token } = await signIn(app, fakeJwt({ sub: 42, iat: now(), exp: now() + 86400 }));
+    const zeke = JSON.parse((await callTool(app, access_token, "ask_zeke", { message: "What is Ven?" })).content[0].text);
+    expect(zeke.caller_context).toBe(false);
+    expect(zeke.answer).toBe("Ven is Hub Culture's digital currency.");
   });
 
   it("applies the member mandate: per-send cap, 24-hour cap, purpose and idempotency", async () => {

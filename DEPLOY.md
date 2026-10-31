@@ -62,6 +62,8 @@ The checklist for getting this server running and available in Claude. Work thro
 | `DEFAULT_SCOPES` | All scopes, as in `.env.example`. Remove `ven:send` to launch without Ven sending. |
 | `DISABLED_TOOLS` | Empty. Name a tool here to turn it off for everyone. |
 
+**In Zeke**, deploy zeke-ai-server with read-only mode (branch `claude/connector-read-only`) so `ask_zeke` can answer with the caller's context. Until then the connector detects the older Zeke and asks it without the caller's token.
+
 **In HubID**, set `MANDALA_ENFORCE_VEN_SEND=true`. Without it, HubID doesn't apply agents' custodian policies (caps, allowlist, owner approval); only the connector's caps would hold.
 
 ## 4. Build and deploy
@@ -97,7 +99,7 @@ curl -i -X POST https://mcp.hubculture.com/mcp | grep -i www-authenticate      #
    - The same call again with the same key returns `replayed` and the balance is unchanged.
    - `ven_send` 101 Ven is refused by the cap, and the balance is unchanged.
    - `ven_purchase_quote` with 200 USD returns a price (only if payments is configured).
-   - `ask_zeke` with "What is Ven?" returns an answer (only if Zeke is configured).
+   - `ask_zeke` with "What do my friends have coming up?" answers about you, with `caller_context: true` (only if Zeke is configured, with read-only mode deployed).
 4. Connect a test agent persona:
    - Issue it a Mandala agent key in HubID, and give it a custodian policy with a low approval threshold.
    - Connect again and choose **Connecting an agent persona instead?** on the consent page.

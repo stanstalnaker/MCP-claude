@@ -54,7 +54,9 @@ A token only lists the tools its scopes allow, minus any in `DISABLED_TOOLS`. cl
 - **Rate limits** apply per sign-in: `RATE_LIMIT_READ_PER_MINUTE` and `RATE_LIMIT_WRITE_PER_MINUTE`.
 - **Kill switches.** `DISABLED_TOOLS` turns off a tool for everyone. Revoking an agent key cuts off that agent within the hour, the next time hub-mcp renews its token; revoking the connector's HubID app keys cuts off every call at once.
 - **Data minimisation.** Other members come back with public basics only; emails, banking and profile fields are dropped. Private fields go only to their owner.
-- **Zeke is read-only.** `ask_zeke` doesn't forward the caller's token. With it, Zeke's own send-Ven tool could move Ven outside the mandate. Zeke answers from Hub Culture's public knowledge.
+- **Zeke answers with the caller's context but stays read-only.** `ask_zeke` forwards the caller's token so Zeke knows who is asking, their friends and its memory of them. It also sends `read_only`, which switches off Zeke's own send-Ven tool, so Ven moves only through the connector's mandate.
+  - The token goes only to a Zeke whose `/health` advertises `read_only` (zeke-ai-server branch `claude/connector-read-only`). An older Zeke gets no token and answers from public knowledge; the result's `caller_context` says which happened.
+  - `thread_id` must be one the connector issued to the same HubID, so nobody can resume another member's conversation.
 - **No admin access.** The payments interchange is always called as role `buyer`.
 
 ## Services it calls
@@ -64,7 +66,7 @@ A token only lists the tools its scopes allow, minus any in `DISABLED_TOOLS`. cl
 | HubID API (`id.hubculture.com`) | hub/HubID | Connector app's `Private-Key`, plus the principal's JWT. `/mandala/*` takes only the agent's JWT. |
 | Ven rates (`apilaravel.ven.vc`) | hub/Ven.vc-Core-Laravel | Public |
 | Payments interchange | hub-culture/payments-interchange | HMAC-signed as Hub does (`X-Pay-*`), with the caller's id |
-| Zeke (`/chat`) | hub-culture/zeke-ai-server | System bearer token; no user token |
+| Zeke (`/chat`) | hub-culture/zeke-ai-server | System bearer token, plus the caller's JWT and `read_only` when Zeke advertises read-only mode |
 
 ## Setup
 
